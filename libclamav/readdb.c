@@ -41,6 +41,7 @@
 #include <fcntl.h>
 #include <zlib.h>
 #include <errno.h>
+#include <time.h>
 
 #include "clamav.h"
 #include "cvd.h"
@@ -89,6 +90,12 @@ static pthread_mutex_t cli_ref_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 #define MAX_LDB_SUBSIGS 64
+
+#define duration(n, c) tim_start = clock(); \
+    c; \
+    tim_diff = clock() - tim_start; \
+    tim_msec = tim_diff * 1000 / CLOCKS_PER_SEC; \
+    cli_dbgmsg("duration %d: %d,%d\n", n, tim_msec/1000, tim_msec%1000);
 
 char *cli_virname(const char *virname, unsigned int official)
 {
@@ -906,6 +913,8 @@ static cl_error_t cli_loaddb(FILE *fs, struct cl_engine *engine, unsigned int *s
             return CL_EMEM;
         }
 
+    cli_dbgmsg("cli_loaddb: loading %s\n", dbname);
+
     while (cli_dbgets(buffer, FILEBUFF, fs, dbio)) {
         line++;
         if (buffer[0] == '#')
@@ -1707,6 +1716,8 @@ static int load_oneldb(char *buffer, int chkpua, struct cl_engine *engine, unsig
 
     UNUSEDPARAM(dbname);
 
+    clock_t tim_start, tim_diff; unsigned int tim_msec;
+
     tokens_count = cli_ldbtokenize(buffer, ';', LDB_TOKENS + 1, (const char **)tokens, 2);
     if (tokens_count < 4) {
         cli_errmsg("Invalid or unsupported ldb signature format\n");
@@ -1802,23 +1813,29 @@ static int load_oneldb(char *buffer, int chkpua, struct cl_engine *engine, unsig
     if (bc_idx)
         root->linked_bcs++;
     root->ac_lsigs++;
-    newtable = (struct cli_ac_lsig **)MPOOL_REALLOC(engine->mempool, root->ac_lsigtable, root->ac_lsigs * sizeof(struct cli_ac_lsig *));
-    if (!newtable) {
-        if (bc_idx)
-            root->linked_bcs--;
-        root->ac_lsigs--;
-        cli_errmsg("cli_loadldb: Can't realloc root->ac_lsigtable\n");
-        FREE_TDB(tdb);
-        MPOOL_FREE(engine->mempool, lsig);
-        return CL_EMEM;
+    
+    if (root->ac_lsigs > root->ac_lsigtable_size) {
+        root->ac_lsigtable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->ac_lsigtable_size + CLI_MATCHER_ALLOCBLOCK : root->ac_lsigs;
+        newtable = (struct cli_ac_lsig **)MPOOL_REALLOC(engine->mempool, root->ac_lsigtable, root->ac_lsigtable_size * sizeof(struct cli_ac_lsig *));
+        if (!newtable) {
+            if (bc_idx)
+                root->linked_bcs--;
+            root->ac_lsigs--;
+            root->ac_lsigtable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->ac_lsigtable_size - CLI_MATCHER_ALLOCBLOCK : root->ac_lsigs;
+            cli_errmsg("cli_loadldb: Can't realloc root->ac_lsigtable\n");
+            FREE_TDB(tdb);
+            MPOOL_FREE(engine->mempool, lsig);
+            return CL_EMEM;
+        }
+
+        root->ac_lsigtable = newtable;
     }
 
     /* 0 marks no bc, we can't use a pointer to bc, since that is
      * realloced/moved during load */
-    lsig->bc_idx                 = bc_idx;
-    newtable[root->ac_lsigs - 1] = lsig;
-    root->ac_lsigtable           = newtable;
-    tdb.subsigs                  = subsigs;
+    lsig->bc_idx                           = bc_idx;
+    root->ac_lsigtable[root->ac_lsigs - 1] = lsig;
+    tdb.subsigs                            = subsigs;
 
     for (i = 0; i < subsigs; i++) {
         lsigid[1] = i;
@@ -1827,7 +1844,9 @@ static int load_oneldb(char *buffer, int chkpua, struct cl_engine *engine, unsig
         sigopts     = NULL;
         subsig_opts = 0;
 
+        duration(10,
         subtokens_count = cli_ldbtokenize(tokens[3 + i], ':', SUB_TOKENS + 1, (const char **)subtokens, 0);
+        );
         if (!subtokens_count) {
             cli_errmsg("Invalid or unsupported ldb subsignature format\n");
             return CL_EMALFDB;
@@ -1864,14 +1883,17 @@ static int load_oneldb(char *buffer, int chkpua, struct cl_engine *engine, unsig
 
         sig = (subtokens_count % 2) ? subtokens[0] : subtokens[1];
 
+        duration(11,
         if (subsig_opts)
             ret = cli_sigopts_handler(root, virname, sig, subsig_opts, 0, 0, offset, target, lsigid, options);
         else
             ret = cli_parse_add(root, virname, sig, 0, 0, 0, offset, target, lsigid, options);
+        );
 
         if (ret)
             return ret;
 
+        duration(12,
         if (sig[0] == '$' && i) {
             /* allow mapping from lsig back to pattern for macros */
             if (!tdb.macro_ptids)
@@ -1881,6 +1903,7 @@ static int load_oneldb(char *buffer, int chkpua, struct cl_engine *engine, unsig
 
             tdb.macro_ptids[i - 1] = root->ac_patterns - 1;
         }
+        );
     }
 
     memcpy(&lsig->tdb, &tdb, sizeof(tdb));
@@ -1890,8 +1913,9 @@ static int load_oneldb(char *buffer, int chkpua, struct cl_engine *engine, unsig
 static int cli_loadldb(FILE *fs, struct cl_engine *engine, unsigned int *signo, unsigned int options, struct cli_dbio *dbio, const char *dbname)
 {
     char buffer[CLI_DEFAULT_LSIG_BUFSIZE + 1], *buffer_cpy = NULL;
-    unsigned int line = 0, sigs = 0;
+    unsigned int line = 0, sigs = 0, slow_line = 0;
     int ret;
+    unsigned int slow_time = 0;
 
     if (CL_SUCCESS != (ret = cli_initroots(engine, options)))
         return ret;
@@ -1902,6 +1926,8 @@ static int cli_loadldb(FILE *fs, struct cl_engine *engine, unsigned int *signo, 
             return CL_EMEM;
         }
     }
+
+    clock_t lp_start = clock(), lp_diff;
 
     while (cli_dbgets(buffer, sizeof(buffer), fs, dbio)) {
         line++;
@@ -1914,12 +1940,26 @@ static int cli_loadldb(FILE *fs, struct cl_engine *engine, unsigned int *signo, 
         if (engine->ignored)
             strcpy(buffer_cpy, buffer);
 
+        clock_t tim_start = clock();
+
         ret = load_oneldb(buffer,
                           engine->pua_cats && (options & CL_DB_PUA_MODE) && (options & (CL_DB_PUA_INCLUDE | CL_DB_PUA_EXCLUDE)),
                           engine, options, dbname, line, &sigs, 0, buffer_cpy, NULL);
+
+        unsigned int tim_diff = (clock() - tim_start) * 1000 / CLOCKS_PER_SEC;
+
+        if (tim_diff > slow_time) {
+            slow_time = tim_diff;
+            slow_line = line;
+        }
+
         if (ret)
             break;
     }
+
+    lp_diff = clock() - lp_start;
+    unsigned int lp_msec = lp_diff * 1000 / CLOCKS_PER_SEC;
+    unsigned int avg_msec = lp_msec / sigs;
 
     if (engine->ignored)
         free(buffer_cpy);
@@ -1936,6 +1976,8 @@ static int cli_loadldb(FILE *fs, struct cl_engine *engine, unsigned int *signo, 
 
     if (signo)
         *signo += sigs;
+
+    cli_dbgmsg("Slow load line number: %u (duration: %d,%dsec / average: %d,%dsec)\n", slow_line, slow_time/1000, slow_time%1000, avg_msec/1000, avg_msec%1000);
 
     return CL_SUCCESS;
 }
@@ -4341,117 +4383,157 @@ cl_error_t cli_load(const char *filename, struct cl_engine *engine, unsigned int
 #ifdef HAVE_YARA
     if (options & CL_DB_YARA_ONLY) {
         if (cli_strbcasestr(dbname, ".yar") || cli_strbcasestr(dbname, ".yara"))
+            cli_dbgmsg("Loading yara %s\n", dbname);
             ret = cli_loadyara(fs, engine, signo, options, dbio, filename);
         else
             skipped = 1;
     } else
 #endif
         if (cli_strbcasestr(dbname, ".db")) {
+        cli_dbgmsg("Loading db %s\n", dbname);
         ret = cli_loaddb(fs, engine, signo, options, dbio, dbname);
 
     } else if (cli_strbcasestr(dbname, ".cvd")) {
+        cli_dbgmsg("Loading cvd %s\n", dbname);
         ret = cli_cvdload(fs, engine, signo, options, 0, filename, 0);
 
     } else if (cli_strbcasestr(dbname, ".cld")) {
+        cli_dbgmsg("Loading cld %s\n", dbname);
         ret = cli_cvdload(fs, engine, signo, options, 1, filename, 0);
 
     } else if (cli_strbcasestr(dbname, ".cud")) {
+        cli_dbgmsg("Loading cud %s\n", dbname);
         ret = cli_cvdload(fs, engine, signo, options, 2, filename, 0);
 
     } else if (cli_strbcasestr(dbname, ".crb")) {
+        cli_dbgmsg("Loading crb %s\n", dbname);
         ret = cli_loadcrt(fs, engine, dbio);
 
     } else if (cli_strbcasestr(dbname, ".hdb") || cli_strbcasestr(dbname, ".hsb")) {
+        cli_dbgmsg("Loading hdb/hsb %s\n", dbname);
         ret = cli_loadhash(fs, engine, signo, MD5_HDB, options, dbio, dbname);
     } else if (cli_strbcasestr(dbname, ".hdu") || cli_strbcasestr(dbname, ".hsu")) {
-        if (options & CL_DB_PUA)
+        if (options & CL_DB_PUA) {
+            cli_dbgmsg("Loading hdu/hsu %s\n", dbname);
             ret = cli_loadhash(fs, engine, signo, MD5_HDB, options | CL_DB_PUA_MODE, dbio, dbname);
-        else
+        } else {
             skipped = 1;
+        }
 
     } else if (cli_strbcasestr(dbname, ".fp") || cli_strbcasestr(dbname, ".sfp")) {
+        cli_dbgmsg("Loading fp/sfp %s\n", dbname);
         ret = cli_loadhash(fs, engine, signo, MD5_FP, options, dbio, dbname);
     } else if (cli_strbcasestr(dbname, ".mdb") || cli_strbcasestr(dbname, ".msb")) {
+        cli_dbgmsg("Loading mdb/msb %s\n", dbname);
         ret = cli_loadhash(fs, engine, signo, MD5_MDB, options, dbio, dbname);
     } else if (cli_strbcasestr(dbname, ".imp")) {
+        cli_dbgmsg("Loading imp %s\n", dbname);
         ret = cli_loadhash(fs, engine, signo, MD5_IMP, options, dbio, dbname);
 
     } else if (cli_strbcasestr(dbname, ".mdu") || cli_strbcasestr(dbname, ".msu")) {
-        if (options & CL_DB_PUA)
+        if (options & CL_DB_PUA) {
+            cli_dbgmsg("Loading mdu/msu %s\n", dbname);
             ret = cli_loadhash(fs, engine, signo, MD5_MDB, options | CL_DB_PUA_MODE, dbio, dbname);
-        else
+        } else {
             skipped = 1;
+        }
 
     } else if (cli_strbcasestr(dbname, ".ndb")) {
+        cli_dbgmsg("Loading ndb %s\n", dbname);
         ret = cli_loadndb(fs, engine, signo, 0, options, dbio, dbname);
 
     } else if (cli_strbcasestr(dbname, ".ndu")) {
         if (!(options & CL_DB_PUA))
             skipped = 1;
-        else
+        else {
+            cli_dbgmsg("Loading ndu %s\n", dbname);
             ret = cli_loadndb(fs, engine, signo, 0, options | CL_DB_PUA_MODE, dbio, dbname);
+        }
 
     } else if (cli_strbcasestr(filename, ".ldb")) {
+        cli_dbgmsg("Loading ldb %s\n", dbname);
         ret = cli_loadldb(fs, engine, signo, options, dbio, dbname);
 
     } else if (cli_strbcasestr(filename, ".ldu")) {
-        if (options & CL_DB_PUA)
+        if (options & CL_DB_PUA) {
+            cli_dbgmsg("Loading ldu %s\n", dbname);
             ret = cli_loadldb(fs, engine, signo, options | CL_DB_PUA_MODE, dbio, dbname);
-        else
+        } else {
             skipped = 1;
+        }
+
     } else if (cli_strbcasestr(filename, ".cbc")) {
-        if (options & CL_DB_BYTECODE)
+        if (options & CL_DB_BYTECODE) {
+            cli_dbgmsg("Loading cbc %s\n", dbname);
             ret = cli_loadcbc(fs, engine, signo, options, dbio, dbname);
-        else
+        } else {
             skipped = 1;
+        }
+
     } else if (cli_strbcasestr(dbname, ".sdb")) {
+        cli_dbgmsg("Loading sdb %s\n", dbname);
         ret = cli_loadndb(fs, engine, signo, 1, options, dbio, dbname);
 
     } else if (cli_strbcasestr(dbname, ".zmd")) {
+        cli_dbgmsg("Loading zmd %s\n", dbname);
         ret = cli_loadmd(fs, engine, signo, 1, options, dbio, dbname);
 
     } else if (cli_strbcasestr(dbname, ".rmd")) {
+        cli_dbgmsg("Loading rmd %s\n", dbname);
         ret = cli_loadmd(fs, engine, signo, 2, options, dbio, dbname);
 
     } else if (cli_strbcasestr(dbname, ".cfg")) {
+        cli_dbgmsg("Loading cfg %s\n", dbname);
         ret = cli_dconf_load(fs, engine, options, dbio);
 
     } else if (cli_strbcasestr(dbname, ".info")) {
+        cli_dbgmsg("Loading info %s\n", dbname);
         ret = cli_loadinfo(fs, engine, options, dbio);
 
     } else if (cli_strbcasestr(dbname, ".wdb")) {
         if (options & CL_DB_PHISHING_URLS) {
+            cli_dbgmsg("Loading wdb %s\n", dbname);
             ret = cli_loadwdb(fs, engine, options, dbio);
         } else
             skipped = 1;
     } else if (cli_strbcasestr(dbname, ".pdb") || cli_strbcasestr(dbname, ".gdb")) {
         if (options & CL_DB_PHISHING_URLS) {
+            cli_dbgmsg("Loading pdb/gdb %s\n", dbname);
             ret = cli_loadpdb(fs, engine, signo, options, dbio);
         } else
             skipped = 1;
     } else if (cli_strbcasestr(dbname, ".ftm")) {
+        cli_dbgmsg("Loading ftm %s\n", dbname);
         ret = cli_loadftm(fs, engine, options, 0, dbio);
 
     } else if (cli_strbcasestr(dbname, ".ign") || cli_strbcasestr(dbname, ".ign2")) {
+        cli_dbgmsg("Loading ign/ign2 %s\n", dbname);
         ret = cli_loadign(fs, engine, options, dbio);
 
     } else if (cli_strbcasestr(dbname, ".idb")) {
+        cli_dbgmsg("Loading idb %s\n", dbname);
         ret = cli_loadidb(fs, engine, signo, options, dbio);
 
     } else if (cli_strbcasestr(dbname, ".cdb")) {
+        cli_dbgmsg("Loading cdb %s\n", dbname);
         ret = cli_loadcdb(fs, engine, signo, options, dbio);
     } else if (cli_strbcasestr(dbname, ".cat")) {
+        cli_dbgmsg("Loading cat %s\n", dbname);
         ret = cli_loadmscat(fs, dbname, engine, options, dbio);
     } else if (cli_strbcasestr(dbname, ".ioc")) {
+        cli_dbgmsg("Loading ioc %s\n", dbname);
         ret = cli_loadopenioc(fs, dbname, engine, options);
 #ifdef HAVE_YARA
     } else if (cli_strbcasestr(dbname, ".yar") || cli_strbcasestr(dbname, ".yara")) {
-        if (!(options & CL_DB_YARA_EXCLUDE))
+        if (!(options & CL_DB_YARA_EXCLUDE)) {
+            cli_dbgmsg("Loading yar/yara %s\n", dbname);
             ret = cli_loadyara(fs, engine, signo, options, dbio, filename);
-        else
+        } else {
             skipped = 1;
+        }
 #endif
     } else if (cli_strbcasestr(dbname, ".pwdb")) {
+        cli_dbgmsg("Loading pwdb %s\n", dbname);
         ret = cli_loadpwdb(fs, engine, options, 0, dbio);
     } else {
         cli_warnmsg("cli_load: unknown extension - skipping %s\n", filename);

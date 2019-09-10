@@ -99,6 +99,7 @@ struct cli_ac_patt {
     uint16_t ch_maxdist[2];
     uint16_t parts, partno, special, special_pattern;
     struct cli_ac_special **special_table;
+    size_t special_table_size;
     uint16_t rtype, type;
     uint32_t offdata[4], offset_min, offset_max;
     uint32_t boundary;

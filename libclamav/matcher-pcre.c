@@ -377,17 +377,23 @@ cl_error_t cli_pcre_addpatt(struct cli_matcher *root, const char *virname, const
 
     /* add pcre data to root after reallocation */
     pcre_count   = root->pcre_metas + 1;
-    newmetatable = (struct cli_pcre_meta **)MPOOL_REALLOC(root->mempool, root->pcre_metatable,
-                                                          pcre_count * sizeof(struct cli_pcre_meta *));
-    if (!newmetatable) {
-        cli_errmsg("cli_pcre_addpatt: Unable to allocate memory for new pcre meta table\n");
-        cli_pcre_freemeta(root, pm);
-        MPOOL_FREE(root->mempool, pm);
-        return CL_EMEM;
+
+    if (pcre_count > root->pcre_metatable_size) {
+        root->pcre_metatable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->pcre_metatable_size + CLI_MATCHER_ALLOCBLOCK : pcre_count;
+        newmetatable = (struct cli_pcre_meta **)MPOOL_REALLOC(root->mempool, root->pcre_metatable,
+                                                            root->pcre_metatable_size * sizeof(struct cli_pcre_meta *));
+        if (!newmetatable) {
+            root->pcre_metatable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->pcre_metatable_size - CLI_MATCHER_ALLOCBLOCK : root->pcre_metas;
+            cli_errmsg("cli_pcre_addpatt: Unable to allocate memory for new pcre meta table\n");
+            cli_pcre_freemeta(root, pm);
+            MPOOL_FREE(root->mempool, pm);
+            return CL_EMEM;
+        }
+
+        root->pcre_metatable = newmetatable;
     }
 
-    newmetatable[pcre_count - 1] = pm;
-    root->pcre_metatable         = newmetatable;
+    root->pcre_metatable[pcre_count - 1] = pm;
 
     root->pcre_metas = pcre_count;
 

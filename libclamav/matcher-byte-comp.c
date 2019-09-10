@@ -423,16 +423,21 @@ cl_error_t cli_bcomp_addpatt(struct cli_matcher *root, const char *virname, cons
     /* add byte compare info to the root after reallocation */
     bcomp_count = root->bcomp_metas + 1;
 
-    /* allocate space for new meta table to store in root structure and increment number of byte compare patterns added */
-    newmetatable = (struct cli_bcomp_meta **)MPOOL_REALLOC(root->mempool, root->bcomp_metatable, bcomp_count * sizeof(struct cli_bcomp_meta *));
-    if (!newmetatable) {
-        cli_errmsg("cli_bcomp_addpatt: Unable to allocate memory for new bcomp meta table\n");
-        cli_bcomp_freemeta(root, bcomp);
-        return CL_EMEM;
+    if (bcomp_count > root->bcomp_metatable_size) {
+        root->bcomp_metatable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->bcomp_metatable_size + CLI_MATCHER_ALLOCBLOCK : bcomp_count;
+        /* allocate space for new meta table to store in root structure and increment number of byte compare patterns added */
+        newmetatable = (struct cli_bcomp_meta **)MPOOL_REALLOC(root->mempool, root->bcomp_metatable, root->bcomp_metatable_size * sizeof(struct cli_bcomp_meta *));
+        if (!newmetatable) {
+            root->bcomp_metatable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->bcomp_metatable_size - CLI_MATCHER_ALLOCBLOCK : root->bcomp_metas;
+            cli_errmsg("cli_bcomp_addpatt: Unable to allocate memory for new bcomp meta table\n");
+            cli_bcomp_freemeta(root, bcomp);
+            return CL_EMEM;
+        }
+
+        root->bcomp_metatable = newmetatable;
     }
 
-    newmetatable[bcomp_count - 1] = bcomp;
-    root->bcomp_metatable         = newmetatable;
+    root->bcomp_metatable[bcomp_count - 1] = bcomp;
 
     root->bcomp_metas = bcomp_count;
 

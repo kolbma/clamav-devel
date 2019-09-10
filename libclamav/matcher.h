@@ -107,6 +107,9 @@ struct cli_ac_lsig {
     struct cli_lsig_tdb tdb;
 };
 
+#define CLI_MATCHER_ALLOCBLOCK 0
+#define ALLOCBLOCK_PATTABLE 1000
+
 struct cli_matcher {
     unsigned int type;
 
@@ -122,6 +125,7 @@ struct cli_matcher {
 
     /* Extended Aho-Corasick */
     uint32_t ac_partsigs, ac_nodes, ac_lists, ac_patterns, ac_lsigs;
+    size_t ac_pattable_size, ac_nodetable_size, ac_listtable_size, ac_lsigtable_size;
     struct cli_ac_lsig **ac_lsigtable;
     struct cli_ac_node *ac_root, **ac_nodetable;
     struct cli_ac_list **ac_listtable;
@@ -138,12 +142,14 @@ struct cli_matcher {
 #if HAVE_PCRE
     uint32_t pcre_metas;
     struct cli_pcre_meta **pcre_metatable;
+    size_t pcre_metatable_size;
     uint32_t pcre_reloff_num, pcre_absoff_num;
 #endif
 
     /* Byte Compare */
     uint32_t bcomp_metas;
     struct cli_bcomp_meta **bcomp_metatable;
+    size_t bcomp_metatable_size;
 
     /* Bytecode Tracker */
     uint32_t linked_bcs;

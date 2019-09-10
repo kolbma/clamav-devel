@@ -107,15 +107,20 @@ static inline int insert_list(struct cli_matcher *root, struct cli_ac_patt *patt
     new->me = pattern;
 
     root->ac_lists++;
-    newtable = MPOOL_REALLOC(root->mempool, root->ac_listtable, root->ac_lists * sizeof(struct cli_ac_list *));
-    if (!newtable) {
-        root->ac_lists--;
-        cli_errmsg("cli_ac_addpatt: Can't realloc ac_listtable\n");
-        MPOOL_FREE(root->mempool, new);
-        return CL_EMEM;
+    if (root->ac_lists > root->ac_listtable_size) {
+        root->ac_listtable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->ac_listtable_size + CLI_MATCHER_ALLOCBLOCK : root->ac_lists;
+        newtable = MPOOL_REALLOC(root->mempool, root->ac_listtable, root->ac_listtable_size * sizeof(struct cli_ac_list *));
+        if (!newtable) {
+            root->ac_lists--;
+            root->ac_listtable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->ac_listtable_size - CLI_MATCHER_ALLOCBLOCK : root->ac_lists;
+            cli_errmsg("cli_ac_addpatt: Can't realloc ac_listtable\n");
+            MPOOL_FREE(root->mempool, new);
+            return CL_EMEM;
+        }
+
+        root->ac_listtable = newtable;
     }
 
-    root->ac_listtable                     = newtable;
     root->ac_listtable[root->ac_lists - 1] = new;
 
     ph           = pt->list;
@@ -245,17 +250,22 @@ static inline struct cli_ac_node *add_new_node(struct cli_matcher *root, uint16_
     }
 
     root->ac_nodes++;
-    newtable = MPOOL_REALLOC(root->mempool, root->ac_nodetable, root->ac_nodes * sizeof(struct cli_ac_node *));
-    if (!newtable) {
-        root->ac_nodes--;
-        cli_errmsg("cli_ac_addpatt: Can't realloc ac_nodetable\n");
-        if (new->trans)
-            MPOOL_FREE(root->mempool, new->trans);
-        MPOOL_FREE(root->mempool, new);
-        return NULL;
+    if (root->ac_nodes > root->ac_nodetable_size) {
+        root->ac_nodetable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->ac_nodetable_size + CLI_MATCHER_ALLOCBLOCK : root->ac_nodes;
+        newtable = MPOOL_REALLOC(root->mempool, root->ac_nodetable, root->ac_nodetable_size * sizeof(struct cli_ac_node *));
+        if (!newtable) {
+            root->ac_nodes--;
+            root->ac_nodetable_size = CLI_MATCHER_ALLOCBLOCK > 0 ? root->ac_nodetable_size - CLI_MATCHER_ALLOCBLOCK : root->ac_nodes;
+            cli_errmsg("cli_ac_addpatt: Can't realloc ac_nodetable\n");
+            if (new->trans)
+                MPOOL_FREE(root->mempool, new->trans);
+            MPOOL_FREE(root->mempool, new);
+            return NULL;
+        }
+
+        root->ac_nodetable = newtable;
     }
 
-    root->ac_nodetable                     = newtable;
     root->ac_nodetable[root->ac_nodes - 1] = new;
 
     return new;
@@ -328,14 +338,19 @@ cl_error_t cli_ac_addpatt(struct cli_matcher *root, struct cli_ac_patt *pattern)
 
     /* pattern added to master list */
     root->ac_patterns++;
-    newtable = MPOOL_REALLOC(root->mempool, root->ac_pattable, root->ac_patterns * sizeof(struct cli_ac_patt *));
-    if (!newtable) {
-        root->ac_patterns--;
-        cli_errmsg("cli_ac_addpatt: Can't realloc ac_pattable\n");
-        return CL_EMEM;
+    if (root->ac_patterns > root->ac_pattable_size) {
+        root->ac_pattable_size = ALLOCBLOCK_PATTABLE > 0 ? root->ac_pattable_size + ALLOCBLOCK_PATTABLE : root->ac_patterns;
+        newtable = MPOOL_REALLOC(root->mempool, root->ac_pattable, root->ac_pattable_size * sizeof(struct cli_ac_patt *));
+        if (!newtable) {
+            root->ac_patterns--;
+            root->ac_pattable_size = ALLOCBLOCK_PATTABLE > 0 ? root->ac_pattable_size - ALLOCBLOCK_PATTABLE : root->ac_patterns;
+            cli_errmsg("cli_ac_addpatt: Can't realloc ac_pattable\n");
+            return CL_EMEM;
+        }
+
+        root->ac_pattable = newtable;
     }
 
-    root->ac_pattable                        = newtable;
     root->ac_pattable[root->ac_patterns - 1] = pattern;
 
     pattern->depth = len;
@@ -2647,16 +2662,22 @@ cl_error_t cli_ac_addsig(struct cli_matcher *root, const char *virname, const ch
             }
             cli_strlcat(hexnew, "()", hexnewsz);
             new->special++;
-            newtable = (struct cli_ac_special **)MPOOL_REALLOC(root->mempool, new->special_table, new->special * sizeof(struct cli_ac_special *));
-            if (!newtable) {
-                new->special--;
-                MPOOL_FREE(root->mempool, newspecial);
-                cli_errmsg("cli_ac_addsig: Can't realloc new->special_table\n");
-                error = CL_EMEM;
-                break;
+            if (new->special > new->special_table_size) {
+                new->special_table_size = CLI_MATCHER_ALLOCBLOCK > 0 ? new->special_table_size + CLI_MATCHER_ALLOCBLOCK : new->special;
+                newtable = (struct cli_ac_special **)MPOOL_REALLOC(root->mempool, new->special_table, new->special_table_size * sizeof(struct cli_ac_special *));
+                if (!newtable) {
+                    new->special--;
+                    new->special_table_size = CLI_MATCHER_ALLOCBLOCK > 0 ? new->special_table_size - CLI_MATCHER_ALLOCBLOCK : new->special;
+                    MPOOL_FREE(root->mempool, newspecial);
+                    cli_errmsg("cli_ac_addsig: Can't realloc new->special_table\n");
+                    error = CL_EMEM;
+                    break;
+                }
+
+                new->special_table = newtable;
             }
-            newtable[new->special - 1] = newspecial;
-            new->special_table         = newtable;
+
+            new->special_table[new->special - 1] = newspecial;
 
             if (!strcmp(pt, "B")) {
                 newspecial->type = AC_SPECIAL_BOUNDARY;
